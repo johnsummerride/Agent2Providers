@@ -15,6 +15,7 @@ mod images;
 mod models;
 mod onboarding;
 mod reasoning;
+mod session;
 mod sign;
 mod sms;
 mod sms_methods;
