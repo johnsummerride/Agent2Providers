@@ -123,7 +123,7 @@ fn assemble(
 }
 
 pub fn build(session: &str, incoming: &Value, image: bool) -> Result<Value> {
-    let chat_id = match header(incoming, "chatid").or_else(|| header(incoming, "x-session-id")) {
+    let chat_id = match header(incoming, "chatid") {
         Some(value) => value,
         None => sign::uuid()?,
     };
