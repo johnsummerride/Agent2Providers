@@ -71,7 +71,14 @@ pub fn resolve(params: &Value, incoming: &Value) -> Resolved {
     };
     let param = valid(&params["session"]);
     let header = incoming.as_object().and_then(|headers| {
-        headers.iter().find_map(|(name, value)| {
+        // The agent2api host nests inbound client headers under "headers";
+        // other callers pass the flat map. Accept both, inner first.
+        let mut candidates = Vec::new();
+        if let Some(inner) = headers.get("headers").filter(|v| v.is_object()) {
+            candidates.push(inner);
+        }
+        candidates.push(incoming);
+        candidates.into_iter().flatten().find_map(|(name, value)| {
             name.eq_ignore_ascii_case("x-session-id")
                 .then(|| valid(value))
                 .flatten()
@@ -394,6 +401,9 @@ mod tests {
         assert_eq!(resolved.key.as_deref(), Some("header-key"));
         assert!(resolved.params_session_present && resolved.header_session_present);
         assert_eq!(resolve(&json!({}), &json!({"x-session-id":"header-key"})).key.as_deref(), Some("header-key"));
+        // Host-nested shape: inbound client headers sit under "headers".
+        assert_eq!(resolve(&json!({}), &json!({"headers":{"x-session-id":"nested-key"}})).key.as_deref(), Some("nested-key"));
+        assert_eq!(resolve(&json!({"session":"flat-key"}), &json!({"headers":{}})).key.as_deref(), Some("flat-key"));
         assert!(resolve(&json!({"session":"\n"}), &json!({})).key.is_none());
         assert!(resolve(&json!({"session":42}), &json!({})).key.is_none());
     }
