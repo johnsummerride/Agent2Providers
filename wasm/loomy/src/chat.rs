@@ -173,10 +173,13 @@ fn stateful_chat(incoming: &Value) -> bool {
     incoming
         .as_object()
         .and_then(|headers| {
-            headers.iter().find_map(|(name, value)| {
-                name.eq_ignore_ascii_case("x-loomy-request-purpose")
-                    .then(|| value.as_str())
-                    .flatten()
+            let inner = headers.get("headers").filter(|v| v.is_object()).unwrap_or(incoming);
+            inner.as_object().and_then(|map| {
+                map.iter().find_map(|(name, value)| {
+                    name.eq_ignore_ascii_case("x-loomy-request-purpose")
+                        .then(|| value.as_str())
+                        .flatten()
+                })
             })
         })
         .is_none_or(|purpose| purpose == "chat.message")
@@ -266,5 +269,8 @@ mod tests {
         assert!(!stateful_chat(&json!({"x-loomy-request-purpose":"memory.extract"})));
         assert!(!stateful_chat(&json!({"x-loomy-request-purpose":"chat.title"})));
         assert!(!stateful_chat(&json!({"x-loomy-request-purpose":"image.generate"})));
+        // Host-nested header map behaves identically to the flat map.
+        assert!(stateful_chat(&json!({"headers":{"x-loomy-request-purpose":"chat.message"}})));
+        assert!(!stateful_chat(&json!({"headers":{"x-loomy-request-purpose":"chat.title"}})));
     }
 }
