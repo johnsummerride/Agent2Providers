@@ -8,7 +8,7 @@
 
 use agent2api_wasm_sdk::{json, Result, Value};
 
-use super::{sign, CLIENT_VERSION};
+use super::{session, CLIENT_VERSION};
 
 /// 官方 opencode 客户端 UA，chat 与 image 两个分支都原样发送。
 const USER_AGENT: &str = "opencode/1.14.22 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13";
@@ -75,17 +75,12 @@ fn assemble(
     session: &str,
     incoming: &Value,
     image: bool,
-    chat_id: &str,
-    msg_id: &str,
-    traceparent: &str,
+    material: &session::Material,
 ) -> Value {
-    let chat_id = prefixed(chat_id, CHAT_PREFIX);
-    let msg_id = prefixed(msg_id, MSG_PREFIX);
+    let chat_id = prefixed(&material.chat_id, CHAT_PREFIX);
+    let msg_id = prefixed(&material.msg_id, MSG_PREFIX);
     let purpose = purpose(incoming, image);
-    let turn_id = match header(incoming, "turnid") {
-        Some(value) => prefixed(&value, MSG_PREFIX),
-        None => msg_id.clone(),
-    };
+    let turn_id = prefixed(&material.turn_id, MSG_PREFIX);
     // 官方只接受 user|system，其它取值（如 nexus）丢弃并回落 user。
     let origin = match header(incoming, "invokeorigin").as_deref() {
         Some("system") => "system",
@@ -96,7 +91,7 @@ fn assemble(
         "Accept": if image { "application/json" } else { "*/*" },
         "User-Agent": USER_AGENT,
         "Authorization": format!("Bearer {session}"),
-        "traceparent": traceparent,
+        "traceparent": material.traceparent,
         "ChatId": chat_id,
         "MsgId": msg_id,
         "InvokeOrigin": origin,
@@ -110,7 +105,7 @@ fn assemble(
         headers["TurnId"] = json!(turn_id);
     }
     // 不提供就不输出，绝不自行随机或伪造。
-    if let Some(affinity) = header(incoming, "x-session-affinity") {
+    if let Some(affinity) = &material.affinity {
         headers["x-session-affinity"] = json!(affinity);
     }
     // 官方 chat.title 不带 parent；parent 只透传调用方给的值。
@@ -122,28 +117,43 @@ fn assemble(
     headers
 }
 
+pub fn overrides(incoming: &Value) -> session::Overrides {
+    session::Overrides {
+        chat_id: header(incoming, "chatid"),
+        msg_id: header(incoming, "msgid").or_else(|| header(incoming, "x-request-id")),
+        turn_id: header(incoming, "turnid"),
+        traceparent: header(incoming, "traceparent")
+            .filter(|value| valid_traceparent(value))
+            .map(|value| value.to_ascii_lowercase()),
+        affinity: header(incoming, "x-session-affinity"),
+    }
+}
+
+fn build_with_material(session: &str, incoming: &Value, image: bool, material: session::Material) -> Value {
+    assemble(session, incoming, image, &material)
+}
+
 pub fn build(session: &str, incoming: &Value, image: bool) -> Result<Value> {
-    let chat_id = match header(incoming, "chatid").or_else(|| header(incoming, "x-session-id")) {
-        Some(value) => value,
-        None => sign::uuid()?,
-    };
-    let msg_id = match header(incoming, "msgid").or_else(|| header(incoming, "x-request-id")) {
-        Some(value) => value,
-        None => sign::uuid()?,
-    };
-    let traceparent = match header(incoming, "traceparent").filter(|value| valid_traceparent(value))
-    {
-        Some(value) => value.to_ascii_lowercase(),
-        None => format!("00-{}-{}-01", sign::random_hex(16)?, sign::random_hex(8)?),
-    };
-    Ok(assemble(
-        session,
-        incoming,
-        image,
-        &chat_id,
-        &msg_id,
-        &traceparent,
-    ))
+    let material = session::material(
+        &session::Resolved {
+            params_session_present: false,
+            header_session_present: false,
+            key: None,
+        },
+        false,
+        &overrides(incoming),
+    )?;
+    Ok(build_with_material(session, incoming, image, material.0))
+}
+
+pub fn build_stateful(
+    session: &str,
+    incoming: &Value,
+    resolved: &session::Resolved,
+    continuing: bool,
+) -> Result<(Value, Option<session::State>)> {
+    let (material, state) = session::material(resolved, continuing, &overrides(incoming))?;
+    Ok((build_with_material(session, incoming, false, material), state))
 }
 
 #[cfg(test)]
@@ -157,7 +167,23 @@ mod tests {
     const UA: &str = "opencode/1.14.22 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13";
 
     fn assemble_with(incoming: Value, image: bool) -> Value {
-        assemble(SESSION, &incoming, image, CHAT, MSG, TRACE)
+        let material = session::Material {
+            chat_id: CHAT.to_string(),
+            msg_id: MSG.to_string(),
+            turn_id: incoming
+                .get("turnid")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| MSG.to_string()),
+            traceparent: incoming
+                .get("traceparent")
+                .and_then(Value::as_str)
+                .filter(|value| valid_traceparent(value))
+                .map(str::to_ascii_lowercase)
+                .unwrap_or_else(|| TRACE.to_string()),
+            affinity: header(&incoming, "x-session-affinity"),
+        };
+        assemble(SESSION, &incoming, image, &material)
     }
 
     fn get<'a>(headers: &'a Value, name: &str) -> Option<&'a str> {

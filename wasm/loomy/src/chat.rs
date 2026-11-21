@@ -1,5 +1,5 @@
 //! 按本账号目录选择 Chat / Messages；输出完整帧之后才发送，不把截断 DONE 视为成功。
-use super::{account, errors, headers, models, MODEL_BASE};
+use super::{account, errors, headers, models, session, MODEL_BASE};
 use agent2api_wasm_sdk::{
     self as sdk, http, json, protocol, sse::SseDecoder, Error, Result, Value,
 };
@@ -169,7 +169,22 @@ fn stream_error(value: &Value, session: &str) -> Error {
     errors::http_error(status, value, &[session])
 }
 
+fn stateful_chat(incoming: &Value) -> bool {
+    incoming
+        .as_object()
+        .and_then(|headers| {
+            headers.iter().find_map(|(name, value)| {
+                name.eq_ignore_ascii_case("x-loomy-request-purpose")
+                    .then(|| value.as_str())
+                    .flatten()
+            })
+        })
+        .is_none_or(|purpose| purpose == "chat.message")
+}
+
 pub fn forward(params: &Value) -> Result<()> {
+    let incoming = &params["headers"];
+    let resolved = session::resolve(params, incoming);
     let record = account::current()?;
     let session = account::token(&record["secret"])?;
     let mut body = params["body"].clone();
@@ -186,9 +201,17 @@ pub fn forward(params: &Value) -> Result<()> {
     body["stream"] = json!(true);
     let anthropic = models::protocol(&model, &session)? == "anthropic";
     super::history::adapt(&mut body, &model)?;
-    let mut headers = headers::build(&session, &params["headers"], false)?;
-    let path = if anthropic {
+    if anthropic {
         body = protocol::request("anthropic", &body, &model)?;
+    }
+    // Continuation is decided on the exact converted body sent to Loomy, never
+    // on the incoming OpenAI shape or on the mere presence of old tool history.
+    let (mut headers, _) = if stateful_chat(incoming) {
+        headers::build_stateful(&session, incoming, &resolved, session::continuation(&body, anthropic))?
+    } else {
+        (headers::build(&session, incoming, false)?, None)
+    };
+    let path = if anthropic {
         headers["anthropic-version"] = json!("2023-06-01");
         headers["x-api-key"] = json!(session);
         "messages"
@@ -224,5 +247,20 @@ pub fn forward(params: &Value) -> Result<()> {
             Err(error)
         }
         result => result,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+
+    #[test]
+    fn auxiliary_purposes_bypass_durable_session_state() {
+        assert!(stateful_chat(&json!({})));
+        assert!(stateful_chat(&json!({"X-Loomy-Request-Purpose":"chat.message"})));
+        assert!(!stateful_chat(&json!({"x-loomy-request-purpose":"memory.extract"})));
+        assert!(!stateful_chat(&json!({"x-loomy-request-purpose":"chat.title"})));
+        assert!(!stateful_chat(&json!({"x-loomy-request-purpose":"image.generate"})));
     }
 }
