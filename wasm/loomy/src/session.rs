@@ -78,11 +78,17 @@ pub fn resolve(params: &Value, incoming: &Value) -> Resolved {
             candidates.push(inner);
         }
         candidates.push(incoming);
-        candidates.into_iter().flatten().find_map(|(name, value)| {
-            name.eq_ignore_ascii_case("x-session-id")
-                .then(|| valid(value))
-                .flatten()
-        })
+        // serde_json::Value itself is not iterable; iterate each candidate's
+        // object map so flatten() yields (name, value) pairs.
+        candidates
+            .into_iter()
+            .filter_map(|candidate| candidate.as_object())
+            .flatten()
+            .find_map(|(name, value)| {
+                name.eq_ignore_ascii_case("x-session-id")
+                    .then(|| valid(value))
+                    .flatten()
+            })
     });
     // The host synthesizes params.session for conversational forwarding. An
     // explicit wire session header must win over that generated value.
